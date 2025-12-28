@@ -123,14 +123,15 @@ object MultiverseCommand: CommandTree {
             literal("teleport") {
                 requires { Permissions.check(it, "multiverse.commands.multiverse.teleport", 2) }
                 argument("dimension", DimensionArgument.dimension()) {
-                    executes { teleportToCustomDimension(it, it.source.position, it.source.rotation) }
+                    executes { teleportToCustomDimension(it, null, it.source.rotation) }
                     argument("position", Vec3Argument.vec3()) {
-                        executes { teleportToCustomDimension(it, rotation = it.source.rotation) }
+                        executes { teleportToCustomDimension(it, Vec3Argument.getVec3(it, "position"), it.source.rotation) }
                         argument("rotation", Vec2Argument.vec2()) {
                             executes(::teleportToCustomDimension)
                         }
                     }
                 }
+
             }
         }
     }
@@ -148,29 +149,34 @@ object MultiverseCommand: CommandTree {
             throw DIMENSION_ALREADY_EXISTS.create(dimension.location())
         }
 
-        server.addCustomLevel {
-            dimensionKey(dimension)
-            levelStem(stem)
-            persistence(LevelPersistence.Persistent)
-            seed(seed)
-            timeOfDay(0L)
-            tickTime(true)
-            if (hasCustomGamerules) {
-                gameRules { }
+        Multiverse.worldCreations.add {
+            server.addCustomLevel {
+                dimensionKey(dimension)
+                levelStem(stem)
+                persistence(LevelPersistence.Persistent)
+                seed(seed)
+                timeOfDay(0L)
+                tickTime(true)
+                if (hasCustomGamerules) {
+                    gameRules { }
+                }
+                if (hasCustomTickManager) {
+                    constructor(::TickManagedCustomLevelFactory)
+                }
+                if (stem.value().generator is FlatLevelSource) {
+                    flat(true)
+                }
             }
-            if (hasCustomTickManager) {
-                constructor(::TickManagedCustomLevelFactory)
+
+            val id = dimension.toIdString()
+            val message = Component {
+                literal("Successfully created custom dimension $id") + nl +
+                        literal("[Click to teleport]").suggestCommand("/multiverse teleport $id ~ ~ ~").yellow()
             }
-            if (stem.value().generator is FlatLevelSource) {
-                flat(true)
-            }
+            context.source.sendSuccess({ message }, true)
         }
-        val id = dimension.toIdString()
-        val message = Component {
-            literal("Successfully created custom dimension $id") + nl +
-                literal("[Click to teleport]").suggestCommand("/multiverse teleport $id ~ ~ ~").yellow()
-        }
-        return context.source.success(message)
+
+        return context.source.success(Component.literal("Dimension creation scheduled..."))
     }
 
     private fun createVanillaDimensions(
@@ -200,17 +206,21 @@ object MultiverseCommand: CommandTree {
                 }
             }
         }
-        for (level in levels.all()) {
-            server.addCustomLevel(level)
+        Multiverse.worldCreations.add {
+            for (level in levels.all()) {
+                server.addCustomLevel(level)
+            }
+
+            val message = Component {
+                literal("Successfully created custom dimensions") + nl + keys.joinToComponent(nl) { (dim, key) ->
+                    val command = "/multiverse teleport ${key.location()} ~ ~ ~"
+                    Component.literal("[Click to teleport to $dim]").suggestCommand(command).yellow()
+                }
+            }
+            context.source.sendSuccess({ message }, true)
         }
 
-        val message = Component {
-            literal("Successfully created custom dimensions") + nl + keys.joinToComponent(nl) { (dim, key) ->
-                val command = "/multiverse teleport ${key.location()} ~ ~ ~"
-                Component.literal("[Click to teleport to $dim]").suggestCommand(command).yellow()
-            }
-        }
-        return context.source.success(message)
+        return context.source.success(Component.literal("Vanilla dimensions creation scheduled..."))
     }
 
     private fun cloneDimension(
@@ -237,27 +247,31 @@ object MultiverseCommand: CommandTree {
             return context.source.fail("Failed to clone dimension, see logs for more info...")
         }
 
-        server.addCustomLevel {
-            dimensionKey(destination)
-            dimensionType(level.dimensionTypeRegistration())
-            chunkGenerator(level.chunkSource.generator)
-            timeOfDay(level.dayTime)
-            tickTime(true)
-            gameRules(level.gameRules.copy(level.enabledFeatures()))
-            seed(level.seed)
-            flat(level.isFlat)
-            persistence(LevelPersistence.Persistent)
-            if (hasCustomTickManager) {
-                constructor(::TickManagedCustomLevelFactory)
+        Multiverse.worldCreations.add {
+            server.addCustomLevel {
+                dimensionKey(destination)
+                dimensionType(level.dimensionTypeRegistration())
+                chunkGenerator(level.chunkSource.generator)
+                timeOfDay(level.dayTime)
+                tickTime(true)
+                gameRules(level.gameRules.copy(level.enabledFeatures()))
+                seed(level.seed)
+                flat(level.isFlat)
+                persistence(LevelPersistence.Persistent)
+                if (hasCustomTickManager) {
+                    constructor(::TickManagedCustomLevelFactory)
+                }
             }
+
+            val id = destination.toIdString()
+            val message = Component {
+                literal("Successfully cloned dimension ${level.dimension().toIdString()} into $id") + nl +
+                        literal("[Click to teleport]").suggestCommand("/multiverse teleport $id ~ ~ ~").yellow()
+            }
+            context.source.sendSuccess({ message }, true)
         }
 
-        val id = destination.toIdString()
-        val message = Component {
-            literal("Successfully cloned dimension ${level.dimension().toIdString()} into $id") + nl +
-                literal("[Click to teleport]").suggestCommand("/multiverse teleport $id ~ ~ ~").yellow()
-        }
-        return context.source.success(message)
+        return context.source.success(Component.literal("Dimension clone scheduled..."))
     }
 
     private fun deleteCustomDimension(
@@ -279,19 +293,39 @@ object MultiverseCommand: CommandTree {
             return context.source.success(message)
         }
 
-        if (context.source.server.deleteCustomLevel(level)) {
-            return context.source.success("Successfully deleted dimension ${dimension.location()}")
-        }
+        Multiverse.worldsToDelete.add(level)
+
         return context.source.fail("Failed to delete dimension ${dimension.location()}")
     }
 
     private fun teleportToCustomDimension(
         context: CommandContext<CommandSourceStack>,
-        position: Vec3 = Vec3Argument.getVec3(context, "position"),
+        position: Vec3? = Vec3Argument.getVec3(context, "position"),
         rotation: Vec2 = Vec2Argument.getVec2(context, "rotation")
     ): Int {
         val level = DimensionArgument.getDimension(context, "dimension")
-        val location = level.asLocation(position, rotation)
+
+        val targetPos = position ?: run {
+            val spawnX = 0
+            val spawnZ = 0
+
+            // 1. FORCE LOAD the chunk at 0,0 so we can read the heightmap correctly
+            level.getChunk(spawnX shr 4, spawnZ shr 4)
+
+            // 2. Get the height of the highest block
+            var spawnY = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, spawnX, spawnZ)
+
+            // 3. SAFETY CHECK:
+            // If spawnY is at the very bottom (Void world or error), default to Y=64 (Sea Level)
+            // This prevents spawning in the void or bedrock layer.
+            if (spawnY < level.dimensionType().minY()) {
+                spawnY = 64
+            }
+
+            Vec3(spawnX.toDouble() + 0.5, spawnY.toDouble() + 1.0, spawnZ.toDouble() + 0.5)
+        }
+
+        val location = level.asLocation(targetPos, rotation)
         context.source.entityOrException.teleportTo(location)
         return context.source.success("Successfully teleported to ${level.dimension().location()}")
     }

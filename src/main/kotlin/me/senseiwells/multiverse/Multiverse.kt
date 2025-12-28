@@ -28,11 +28,19 @@ import net.minecraft.world.level.levelgen.flat.FlatLayerInfo
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings
 import org.slf4j.LoggerFactory
 import java.util.*
+import net.casual.arcade.dimensions.level.CustomLevel
+import net.casual.arcade.dimensions.utils.deleteCustomLevel
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
+import java.util.concurrent.ConcurrentLinkedQueue
 
 object Multiverse: ModInitializer {
     const val MOD_ID = "multiverse"
 
     val logger = LoggerFactory.getLogger(MOD_ID)
+
+    val worldsToDelete = ConcurrentLinkedQueue<CustomLevel>()
+
+    val worldCreations = ConcurrentLinkedQueue<Runnable>()
 
     override fun onInitialize() {
         TickManagedCustomLevelFactory.register(DimensionRegistries.CUSTOM_LEVEL_FACTORY)
@@ -42,7 +50,27 @@ object Multiverse: ModInitializer {
         GlobalEventHandler.Server.register<ServerRegisterCommandEvent> {
             it.register(MultiverseCommand)
         }
+
+        ServerTickEvents.END_SERVER_TICK.register { server ->
+            while (!worldsToDelete.isEmpty()) {
+                val level = worldsToDelete.poll()
+                // Now it is safe to delete because the tick loop is over
+                server.deleteCustomLevel(level)
+                logger.info("Processed deferred deletion for dimension: ${level.dimension().location()}")
+            }
+
+            while (!worldCreations.isEmpty()) {
+                val creationTask = worldCreations.poll()
+                try {
+                    creationTask.run()
+                } catch (e: Exception) {
+                    logger.error("Failed to run deferred creation task", e)
+                }
+            }
+        }
     }
+
+
 
     private fun registerCustomStems(event: RegistryLoadedFromResourcesEvent<LevelStem>) {
         val dimensions = event.lookupOrThrow(Registries.DIMENSION_TYPE)
